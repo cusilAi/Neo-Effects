@@ -1,0 +1,1 @@
+{"neofx":2,"id":"zoom_blur","name":"Zoom Blur","category":"Blur","params":[{"id":"strength","name":"Strength","min":0,"max":1,"default":0.3}],"shader":"vec4 effect(vec2 uv) { vec2 dir = uv - vec2(0.5, 0.5); vec4 c = vec4(0.0); for (int i = 0; i < 12; i++) { float t = float(i) / 11.0; c += texture2D(image, uv - dir * strength * 0.5 * t); } return c / 12.0; }"}
