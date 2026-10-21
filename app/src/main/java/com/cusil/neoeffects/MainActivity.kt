@@ -7,11 +7,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
-import android.graphics.ImageDecoder
 import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.RenderEffect as AndroidRenderEffect
-import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -19,14 +16,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -56,9 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,10 +60,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asComposeRenderEffect
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -226,41 +215,23 @@ fun EditorScreen(effects: List<NeoEffect>, onBack: () -> Unit) {
     val ctx = LocalContext.current
     var bitmap by remember { mutableStateOf(testCard()) }
     var selected by remember { mutableStateOf<NeoEffect?>(effects.firstOrNull()) }
+    var err by remember { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            try {
-                val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ctx.contentResolver, uri)) { d, info, _ ->
-                    val m = maxOf(info.size.width, info.size.height)
-                    if (m > 2048) {
-                        val s = 2048f / m
-                        d.setTargetSize((info.size.width * s).toInt(), (info.size.height * s).toInt())
-                    }
-                }
-                bitmap = bmp
+            val b = try {
+                loadBitmap(ctx, uri)
             } catch (e: Exception) {
+                null
             }
+            if (b != null) bitmap = b
         }
     }
 
     val fx = selected
-    val shader = remember(fx) {
-        if (fx == null) null else try {
-            RuntimeShader(fx.shader)
-        } catch (e: Exception) {
-            null
-        }
-    }
     val values = remember(fx) {
         mutableStateMapOf<String, Float>().apply {
             fx?.params?.forEach { put(it.id, it.def) }
-        }
-    }
-    var time by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(Unit) {
-        val t0 = androidx.compose.runtime.withFrameNanos { it }
-        while (true) {
-            androidx.compose.runtime.withFrameNanos { time = (it - t0) / 1_000_000_000f }
         }
     }
 
@@ -273,27 +244,15 @@ fun EditorScreen(effects: List<NeoEffect>, onBack: () -> Unit) {
             Modifier.weight(1f).fillMaxWidth().padding(8.dp),
             contentAlignment = Alignment.Center
         ) {
-            val ratio = bitmap.width.toFloat() / bitmap.height.toFloat()
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.FillBounds,
-                modifier = Modifier
-                    .aspectRatio(ratio)
-                    .graphicsLayer {
-                        val sh = shader
-                        val f = fx
-                        if (sh != null && f != null) {
-                            try { sh.setFloatUniform("resolution", size.width, size.height) } catch (e: Exception) {}
-                            try { sh.setFloatUniform("time", time) } catch (e: Exception) {}
-                            for (p in f.params) {
-                                try { sh.setFloatUniform(p.id, values[p.id] ?: p.def) } catch (e: Exception) {}
-                            }
-                            renderEffect = AndroidRenderEffect.createRuntimeShaderEffect(sh, "image").asComposeRenderEffect()
-                        } else {
-                            renderEffect = null
-                        }
-                    }
+            GlPreview(bitmap, fx, values, { err = it }, Modifier.fillMaxSize())
+        }
+
+        if (err.isNotEmpty()) {
+            Text(
+                "Shader error: $err",
+                color = Color(0xFFFF6B6B),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 16.dp).heightIn(max = 80.dp).verticalScroll(rememberScrollState())
             )
         }
 

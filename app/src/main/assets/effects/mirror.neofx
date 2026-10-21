@@ -1,1 +1,1 @@
-{"neofx":1,"id":"mirror","name":"Mirror","category":"Distort","params":[],"shader":"uniform shader image; uniform float2 resolution; uniform float time; half4 main(float2 p) { float2 q = p; if (p.x > resolution.x * 0.5) { q.x = resolution.x - p.x; } return image.eval(q); }"}
+{"neofx":2,"id":"mirror","name":"Mirror","category":"Distort","params":[],"shader":"vec4 effect(vec2 uv) { vec2 q = uv; if (uv.x > 0.5) { q.x = 1.0 - uv.x; } return texture2D(image, q); }"}
