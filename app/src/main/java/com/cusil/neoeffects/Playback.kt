@@ -51,7 +51,7 @@ fun loadThumb(ctx: Context, c: Clip): Bitmap? {
                 if (f == null) {
                     null
                 } else {
-                    val h = 120
+                    val h = 200
                     val w = maxOf(1, f.width * h / f.height)
                     Bitmap.createScaledBitmap(f, w, h, true)
                 }

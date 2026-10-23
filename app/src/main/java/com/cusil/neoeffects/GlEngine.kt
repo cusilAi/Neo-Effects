@@ -30,8 +30,16 @@ class GlEngine : GLSurfaceView.Renderer {
     @Volatile var onSurface: (Surface) -> Unit = {}
     @Volatile var currentSurface: Surface? = null
 
+    // project canvas (0 = follow the source aspect, used by Effect Lab)
+    @Volatile var canvasAspect: Float = 0f
+    @Volatile var bgMode: Int = 0
+    @Volatile var maxSide: Int = 1280
+    @Volatile var hidden: Boolean = false
+
     @Volatile private var photo: Bitmap? = null
     @Volatile private var photoDirty = false
+    @Volatile private var bgBmp: Bitmap? = null
+    @Volatile private var bgDirty = false
     @Volatile private var mode = 0
     @Volatile private var vidW = 0
     @Volatile private var vidH = 0
@@ -45,6 +53,9 @@ class GlEngine : GLSurfaceView.Renderer {
     private var photoTex = 0
     private var photoW = 1
     private var photoH = 1
+    private var bgTex = 0
+    private var bgW = 1
+    private var bgH = 1
     private val fbo = IntArray(2)
     private val fboTex = IntArray(2)
     private var fw = 0
@@ -52,6 +63,8 @@ class GlEngine : GLSurfaceView.Renderer {
     private var vw = 1
     private var vh = 1
     private var copyProg = 0
+    private var gradProg = 0
+    private var coverProg = 0
     private val programs = HashMap<String, Int>()
     private val failed = ConcurrentHashMap<String, String>()
     private val texMat = FloatArray(16)
@@ -69,6 +82,11 @@ class GlEngine : GLSurfaceView.Renderer {
         photo = b
         photoDirty = true
         mode = 1
+    }
+
+    fun setBgBitmap(b: Bitmap?) {
+        bgBmp = b
+        bgDirty = true
     }
 
     fun setVideoMode() {
@@ -95,7 +113,10 @@ class GlEngine : GLSurfaceView.Renderer {
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         programs.clear()
         copyProg = 0
+        gradProg = 0
+        coverProg = 0
         photoTex = 0
+        bgTex = 0
         fw = 0
         fh = 0
         fboTex[0] = 0
@@ -103,6 +124,7 @@ class GlEngine : GLSurfaceView.Renderer {
         fbo[0] = 0
         fbo[1] = 0
         photoDirty = photo != null
+        bgDirty = bgBmp != null
         GLES20.glClearColor(0.04f, 0.04f, 0.07f, 1f)
 
         try { st?.release() } catch (e: Exception) { }
@@ -129,12 +151,47 @@ class GlEngine : GLSurfaceView.Renderer {
         vh = height
     }
 
+    private fun fit(aspect: Float): IntArray {
+        val av = vw.toFloat() / vh.toFloat()
+        var rw = vw
+        var rh = vh
+        if (aspect > av) {
+            rh = (vw / aspect).toInt()
+        } else {
+            rw = (vh * aspect).toInt()
+        }
+        return intArrayOf((vw - rw) / 2, (vh - rh) / 2, maxOf(1, rw), maxOf(1, rh))
+    }
+
+    private fun fitIn(r: IntArray, aspect: Float): IntArray {
+        val ar = r[2].toFloat() / r[3].toFloat()
+        var rw = r[2]
+        var rh = r[3]
+        if (aspect > ar) {
+            rh = (r[2] / aspect).toInt()
+        } else {
+            rw = (r[3] * aspect).toInt()
+        }
+        return intArrayOf(r[0] + (r[2] - rw) / 2, r[1] + (r[3] - rh) / 2, maxOf(1, rw), maxOf(1, rh))
+    }
+
     override fun onDrawFrame(gl: GL10?) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, vw, vh)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        if (vw < 2 || vh < 2) return
+        val ca = canvasAspect
         val m = mode
-        if (m == 0 || vw < 2 || vh < 2) return
+        if (bgDirty) {
+            bgDirty = false
+            val bb = bgBmp
+            if (bb != null && !bb.isRecycled) uploadBg(bb)
+        }
+
+        if (m == 0) {
+            if (ca > 0f) drawBackground(fit(ca), 0, 1f)
+            return
+        }
 
         var sw = 1
         var sh = 1
@@ -155,7 +212,7 @@ class GlEngine : GLSurfaceView.Renderer {
             sw = vidW
             sh = vidH
         }
-        val scale = minOf(1f, 1280f / maxOf(sw, sh).toFloat())
+        val scale = minOf(1f, maxSide.toFloat() / maxOf(sw, sh).toFloat())
         val w = maxOf(2, (sw * scale).toInt())
         val h = maxOf(2, (sh * scale).toInt())
         ensureFbo(w, h)
@@ -171,6 +228,12 @@ class GlEngine : GLSurfaceView.Renderer {
             curIdx = 0
         }
 
+        val sa = w.toFloat() / h.toFloat()
+        if (hidden) {
+            if (ca > 0f) drawBackground(fit(ca), cur, sa)
+            return
+        }
+
         val tsec = if (timeSec >= 0f) timeSec else (System.nanoTime() - startNs) / 1_000_000_000f
         val progs = ArrayList<Int>()
         val used = ArrayList<Pass>()
@@ -182,10 +245,13 @@ class GlEngine : GLSurfaceView.Renderer {
             }
         }
 
+        val cr = fit(if (ca > 0f) ca else sa)
+        val ct = if (ca > 0f) fitIn(cr, sa) else cr
+
         if (used.isEmpty()) {
             val pp = programFor(null)
             if (pp != 0) {
-                bindScreen(w, h)
+                bindFinal(cr, ct, cur, sa, ca)
                 drawProgram(pp, cur, w, h, tsec, null, 1f)
             }
             return
@@ -193,7 +259,7 @@ class GlEngine : GLSurfaceView.Renderer {
         for (i in used.indices) {
             val last = i == used.size - 1
             val outIdx = if (curIdx == 0) 1 else 0
-            if (last) bindScreen(w, h) else bindFbo(outIdx, w, h)
+            if (last) bindFinal(cr, ct, cur, sa, ca) else bindFbo(outIdx, w, h)
             drawProgram(progs[i], cur, w, h, tsec, used[i], if (last) 1f else -1f)
             if (!last) {
                 cur = fboTex[outIdx]
@@ -202,18 +268,87 @@ class GlEngine : GLSurfaceView.Renderer {
         }
     }
 
-    private fun bindScreen(w: Int, h: Int) {
+    private fun bindFinal(cr: IntArray, ct: IntArray, tex: Int, sa: Float, ca: Float) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        val at = w.toFloat() / h.toFloat()
-        val av = vw.toFloat() / vh.toFloat()
-        var rw = vw
-        var rh = vh
-        if (at > av) {
-            rh = (vw / at).toInt()
+        if (ca > 0f) drawBackground(cr, tex, sa)
+        GLES20.glViewport(ct[0], ct[1], ct[2], ct[3])
+    }
+
+    private fun clearRect(cr: IntArray, v: Float) {
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glScissor(cr[0], cr[1], cr[2], cr[3])
+        GLES20.glClearColor(v, v, v, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glClearColor(0.04f, 0.04f, 0.07f, 1f)
+    }
+
+    private fun drawBackground(cr: IntArray, tex: Int, sa: Float) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(cr[0], cr[1], cr[2], cr[3])
+        val ka = cr[2].toFloat() / cr[3].toFloat()
+        val mode = bgMode
+        if (mode == 1) {
+            clearRect(cr, 1f)
+        } else if (mode == 2) {
+            drawGradient()
+        } else if (mode == 3 && tex != 0) {
+            drawCover(tex, sa, ka, 1f)
+        } else if (mode == 4 && bgTex != 0) {
+            drawCover(bgTex, bgW.toFloat() / bgH.toFloat(), ka, 0f)
         } else {
-            rw = (vh * at).toInt()
+            clearRect(cr, 0f)
         }
-        GLES20.glViewport((vw - rw) / 2, (vh - rh) / 2, rw, rh)
+    }
+
+    private fun drawGradient() {
+        if (gradProg == 0) {
+            val fs = "precision mediump float;\nvarying vec2 vUv;\n" +
+                "void main() { float t = clamp((vUv.x + vUv.y) * 0.5, 0.0, 1.0); " +
+                "vec3 a = vec3(0.05, 0.03, 0.30); vec3 b = vec3(0.65, 0.12, 0.85); vec3 c = vec3(0.95, 0.20, 0.45); " +
+                "vec3 col = t < 0.5 ? mix(a, b, t * 2.0) : mix(b, c, (t - 0.5) * 2.0); gl_FragColor = vec4(col, 1.0); }\n"
+            try {
+                gradProg = link(NeoFx.VERTEX, fs)
+            } catch (e: Exception) {
+                return
+            }
+        }
+        GLES20.glUseProgram(gradProg)
+        GLES20.glUniform1f(loc(gradProg, "uFlip"), 1f)
+        drawQuad()
+    }
+
+    private fun drawCover(tex: Int, contentAspect: Float, canvasAsp: Float, blur: Float) {
+        if (coverProg == 0) {
+            val vs = "attribute vec2 aPos; uniform float uFlip; uniform vec2 uScale; varying vec2 vUv; " +
+                "void main() { vec2 u = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5); " +
+                "vUv = (u - vec2(0.5, 0.5)) * uScale + vec2(0.5, 0.5); gl_Position = vec4(aPos.x, aPos.y * uFlip, 0.0, 1.0); }"
+            val fs = "precision mediump float;\nuniform sampler2D image;\nuniform float uBlur;\nvarying vec2 vUv;\n" +
+                "void main() { if (uBlur > 0.5) { vec3 c = texture2D(image, vUv).rgb; " +
+                "for (int i = 0; i < 8; i++) { float a = float(i) * 0.785398; vec2 d = vec2(cos(a), sin(a)); " +
+                "c += texture2D(image, vUv + d * 0.03).rgb; c += texture2D(image, vUv + d * 0.07).rgb; } " +
+                "gl_FragColor = vec4(c / 17.0 * 0.55, 1.0); } else { gl_FragColor = vec4(texture2D(image, vUv).rgb, 1.0); } }\n"
+            try {
+                coverProg = link(vs, fs)
+            } catch (e: Exception) {
+                return
+            }
+        }
+        var sx = 1f
+        var sy = 1f
+        if (contentAspect > canvasAsp) {
+            sx = canvasAsp / contentAspect
+        } else {
+            sy = contentAspect / canvasAsp
+        }
+        GLES20.glUseProgram(coverProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+        GLES20.glUniform1i(loc(coverProg, "image"), 0)
+        GLES20.glUniform1f(loc(coverProg, "uFlip"), 1f)
+        GLES20.glUniform1f(loc(coverProg, "uBlur"), blur)
+        GLES20.glUniform2f(loc(coverProg, "uScale"), sx, sy)
+        drawQuad()
     }
 
     private fun bindFbo(idx: Int, w: Int, h: Int) {
@@ -300,15 +435,31 @@ class GlEngine : GLSurfaceView.Renderer {
             GLES20.glGenTextures(1, t, 0)
             photoTex = t[0]
         }
+        bindTexParams(photoTex)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, b, 0)
+        photoW = b.width
+        photoH = b.height
+    }
+
+    private fun uploadBg(b: Bitmap) {
+        if (bgTex == 0) {
+            val t = IntArray(1)
+            GLES20.glGenTextures(1, t, 0)
+            bgTex = t[0]
+        }
+        bindTexParams(bgTex)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, b, 0)
+        bgW = b.width
+        bgH = b.height
+    }
+
+    private fun bindTexParams(tex: Int) {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, photoTex)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, b, 0)
-        photoW = b.width
-        photoH = b.height
     }
 
     private fun programFor(e: NeoEffect?): Int {
@@ -334,9 +485,9 @@ class GlEngine : GLSurfaceView.Renderer {
         val s = GLES20.glCreateShader(type)
         GLES20.glShaderSource(s, src)
         GLES20.glCompileShader(s)
-        val st = IntArray(1)
-        GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, st, 0)
-        if (st[0] == 0) {
+        val ok = IntArray(1)
+        GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, ok, 0)
+        if (ok[0] == 0) {
             val log = GLES20.glGetShaderInfoLog(s)
             GLES20.glDeleteShader(s)
             throw RuntimeException(log)

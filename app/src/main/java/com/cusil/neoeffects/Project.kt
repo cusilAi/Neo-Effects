@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -12,6 +13,7 @@ import androidx.compose.runtime.setValue
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import kotlin.math.abs
 
 class Key(val t: Long, val v: Float)
@@ -86,6 +88,17 @@ fun newClipId(): Long = System.nanoTime()
 class Project(val id: String, var name: String) {
     val clips = mutableStateListOf<Clip>()
     var playheadMs by mutableLongStateOf(0L)
+    var width by mutableIntStateOf(1080)
+    var height by mutableIntStateOf(1920)
+    var fps by mutableIntStateOf(30)
+    var resLabel by mutableStateOf("1080p")
+    var aspectLabel by mutableStateOf("9:16")
+    var bgMode by mutableIntStateOf(0)
+    var bgUri by mutableStateOf("")
+    var autosave by mutableStateOf(true)
+    var previewQ by mutableIntStateOf(1)
+    var templateId by mutableStateOf("")
+    var fav by mutableStateOf(false)
 
     val totalMs: Long
         get() {
@@ -129,6 +142,17 @@ class Project(val id: String, var name: String) {
     }
 }
 
+class ProjInfo(
+    val id: String,
+    val name: String,
+    val modified: Long,
+    val durMs: Long,
+    val clips: Int,
+    val res: String,
+    val fps: Int,
+    val fav: Boolean
+)
+
 object ProjectStore {
     private fun dir(ctx: Context): File {
         val d = File(ctx.filesDir, "projects")
@@ -136,11 +160,24 @@ object ProjectStore {
         return d
     }
 
+    fun thumbFile(ctx: Context, id: String): File = File(dir(ctx), id + ".jpg")
+
     fun toJson(p: Project): JSONObject {
         val o = JSONObject()
         o.put("id", p.id)
         o.put("name", p.name)
         o.put("playhead", p.playheadMs)
+        o.put("width", p.width)
+        o.put("height", p.height)
+        o.put("fps", p.fps)
+        o.put("res", p.resLabel)
+        o.put("aspect", p.aspectLabel)
+        o.put("bgMode", p.bgMode)
+        o.put("bgUri", p.bgUri)
+        o.put("autosave", p.autosave)
+        o.put("previewQ", p.previewQ)
+        o.put("template", p.templateId)
+        o.put("fav", p.fav)
         val cs = JSONArray()
         for (c in p.clips) {
             val co = JSONObject()
@@ -182,6 +219,17 @@ object ProjectStore {
 
     fun fromJson(o: JSONObject, lib: List<NeoEffect>): Project {
         val p = Project(o.getString("id"), o.optString("name", "Project"))
+        p.width = o.optInt("width", 1080)
+        p.height = o.optInt("height", 1920)
+        p.fps = o.optInt("fps", 30)
+        p.resLabel = o.optString("res", "1080p")
+        p.aspectLabel = o.optString("aspect", "9:16")
+        p.bgMode = o.optInt("bgMode", 0)
+        p.bgUri = o.optString("bgUri", "")
+        p.autosave = o.optBoolean("autosave", true)
+        p.previewQ = o.optInt("previewQ", 1)
+        p.templateId = o.optString("template", "")
+        p.fav = o.optBoolean("fav", false)
         val cs = o.optJSONArray("clips")
         if (cs != null) {
             for (i in 0 until cs.length()) {
@@ -234,16 +282,39 @@ object ProjectStore {
 
     fun save(ctx: Context, p: Project) {
         File(dir(ctx), p.id + ".json").writeText(toJson(p).toString())
+        val t = p.clips.firstOrNull { it.thumb != null }?.thumb
+        if (t != null) {
+            try {
+                FileOutputStream(thumbFile(ctx, p.id)).use { t.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            } catch (e: Exception) {
+            }
+        }
     }
 
-    fun list(ctx: Context): List<Triple<String, String, Long>> {
+    fun list(ctx: Context): List<ProjInfo> {
         val fs = dir(ctx).listFiles() ?: return emptyList()
-        val out = ArrayList<Triple<String, String, Long>>()
+        val out = ArrayList<ProjInfo>()
         for (f in fs.sortedByDescending { it.lastModified() }) {
             if (!f.name.endsWith(".json")) continue
             try {
                 val o = JSONObject(f.readText())
-                out.add(Triple(o.getString("id"), o.optString("name", "Project"), f.lastModified()))
+                val cs = o.optJSONArray("clips")
+                var dur = 0L
+                var n = 0
+                if (cs != null) {
+                    n = cs.length()
+                    for (i in 0 until cs.length()) {
+                        val co = cs.getJSONObject(i)
+                        val sp = co.optDouble("speed", 1.0).toFloat()
+                        dur += maxOf(100L, ((co.getLong("out") - co.getLong("in")) / sp).toLong())
+                    }
+                }
+                out.add(
+                    ProjInfo(
+                        o.getString("id"), o.optString("name", "Project"), f.lastModified(),
+                        dur, n, o.optString("res", "1080p"), o.optInt("fps", 30), o.optBoolean("fav", false)
+                    )
+                )
             } catch (e: Exception) {
             }
         }
@@ -258,7 +329,36 @@ object ProjectStore {
         }
     }
 
+    private fun editJson(ctx: Context, id: String, block: (JSONObject) -> Unit) {
+        try {
+            val f = File(dir(ctx), id + ".json")
+            val o = JSONObject(f.readText())
+            block(o)
+            f.writeText(o.toString())
+        } catch (e: Exception) {
+        }
+    }
+
+    fun rename(ctx: Context, id: String, name: String) = editJson(ctx, id) { it.put("name", name) }
+
+    fun setFav(ctx: Context, id: String, fav: Boolean) = editJson(ctx, id) { it.put("fav", fav) }
+
+    fun duplicate(ctx: Context, id: String) {
+        try {
+            val o = JSONObject(File(dir(ctx), id + ".json").readText())
+            val nid = System.currentTimeMillis().toString()
+            o.put("id", nid)
+            o.put("name", o.optString("name", "Project") + " copy")
+            o.put("fav", false)
+            File(dir(ctx), nid + ".json").writeText(o.toString())
+            val t = thumbFile(ctx, id)
+            if (t.exists()) t.copyTo(thumbFile(ctx, nid), true)
+        } catch (e: Exception) {
+        }
+    }
+
     fun delete(ctx: Context, id: String) {
         File(dir(ctx), id + ".json").delete()
+        thumbFile(ctx, id).delete()
     }
 }

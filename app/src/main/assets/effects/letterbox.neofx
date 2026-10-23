@@ -1,0 +1,1 @@
+{"neofx":2,"id":"letterbox","name":"Letterbox","category":"Cinematic","params":[{"id":"bars","name":"Bar size","min":0,"max":0.3,"default":0.12}],"shader":"vec4 effect(vec2 uv) { vec4 c = texture2D(image, uv); float m = step(bars, uv.y) * step(uv.y, 1.0 - bars); return vec4(c.rgb * m, c.a); }"}

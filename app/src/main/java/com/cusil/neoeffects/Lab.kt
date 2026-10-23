@@ -71,7 +71,7 @@ fun testCard(): Bitmap {
 }
 
 @Composable
-fun LabScreen(effects: MutableList<NeoEffect>, onBack: () -> Unit) {
+fun LabScreen(effects: MutableList<NeoEffect>, initial: NeoEffect?, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val gl = remember { GlEngine().also { it.setPhoto(testCard()) } }
     var text by remember { mutableStateOf("") }
@@ -118,6 +118,14 @@ fun LabScreen(effects: MutableList<NeoEffect>, onBack: () -> Unit) {
             msg = "✅ Saved to your library: " + fx.name
         } catch (e: Exception) {
             msg = "❌ " + (e.message ?: "could not save")
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (initial != null) {
+            val j = NeoFx.toJson(initial)
+            text = j
+            doTest(j)
         }
     }
 
